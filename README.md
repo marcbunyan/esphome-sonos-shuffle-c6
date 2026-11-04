@@ -2,6 +2,8 @@
 
 A pocket-sized "iPod Shuffle"-style Sonos controller and Now Playing display powered by **ESPHome**, **LVGL**, and **Home Assistant**. Built for the **Waveshare ESP32-C6-LCD-1.47** development board.
 
+<img width="958" height="1050" alt="image" src="https://github.com/user-attachments/assets/64e24f5e-44bb-4ff3-aeb7-a104b097ec08" />
+
 ## Features
 * **Live Album Art & Track Info:** Displays a 128×128 album cover alongside scrolling track title, artist, and playback state on the 320×172 IPS display.
 * **Progressive JPEG Artwork Support:** Uses Home Assistant's built-in `ffmpeg` to automatically convert progressive JPEGs from streaming services (Spotify, Apple Music, etc.) into lightweight 128×128 PNGs for the ESP32-C6's internal SRAM.
