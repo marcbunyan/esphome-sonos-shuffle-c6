@@ -1,0 +1,447 @@
+# --- Substitutions ---
+substitutions:
+  sonos_entity: "media_player.era_100s"
+  sonos_favs_entity: "sensor.sonos_favorites_2"
+  ha_base_url: "http://homeassistant.arpa:8123"
+
+esphome:
+  name: tiny-sonos-display
+  friendly_name: tiny-sonos-display
+  on_boot:
+    priority: 600
+    then:
+      - light.turn_on: lcd_backlight
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+# --- Communication & Security ---
+logger:
+
+api:
+  encryption:
+    key: "PASTE_YOUR_API_KEY_HERE"
+
+ota:
+  - platform: esphome
+    password: "PASTE_YOUR_OTA_PASSWORD_HERE"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+captive_portal:
+
+# --- HTTP Request & Online Album Art Downloader ---
+http_request:
+  verify_ssl: false
+  timeout: 10s
+  buffer_size_rx: 4096
+
+# Downloads the 128x128 PNG generated locally by Home Assistant's ffmpeg
+image:
+  - platform: online_image
+    id: album_cover_img
+    url: "http://127.0.0.1/none.png"
+    format: PNG
+    type: RGB565
+    buffer_size: 16384
+    update_interval: never
+    on_download_finished:
+      then:
+        - logger.log: "Album art decoded and rendered!"
+        - lvgl.image.update:
+            id: img_album
+            src: album_cover_img
+        # Force LVGL to flush its cached image buffer and redraw the 128x128 widget immediately
+        - lambda: |-
+            lv_img_cache_invalidate_src(NULL);
+            lv_obj_invalidate(id(img_album));
+    on_error:
+      then:
+        - logger.log: "Album art failed! Ensure shell_command.convert_sonos_art and /config/www exist."
+
+# --- Time & Globals ---
+time:
+  - platform: homeassistant
+    id: esptime
+    timezone: "NZST-12NZDT,M9.5.0,M4.1.0/3"
+
+globals:
+  - id: fav_index
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: fav_ids
+    type: std::vector<std::string>
+    restore_value: no
+  - id: fav_names
+    type: std::vector<std::string>
+    restore_value: no
+  - id: browsing_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+# --- Hardware: SPI, Backlight, RGB LED & Display ---
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO6
+
+output:
+  - platform: ledc
+    pin: GPIO22
+    id: backlight_pwm
+    frequency: 1000Hz
+    max_power: 0.50
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    name: "LCD Backlight"
+    id: lcd_backlight
+    restore_mode: ALWAYS_ON
+
+  - platform: esp32_rmt_led_strip
+    channel_colors: GRB
+    pin:
+      number: GPIO8
+      ignore_strapping_warning: true
+    num_leds: 1
+    chipset: ws2812
+    name: "Acrylic Status LED"
+    id: status_led
+
+display:
+  - platform: ili9xxx
+    model: ST7789V
+    id: main_lcd
+    cs_pin: GPIO14
+    dc_pin:
+      number: GPIO15
+      ignore_strapping_warning: true
+    reset_pin: GPIO21
+    dimensions:
+      width: 320
+      height: 172
+      offset_width: 0
+      offset_height: 34
+    transform:
+      swap_xy: true
+      mirror_x: false
+      mirror_y: true
+    invert_colors: true
+    auto_clear_enabled: false
+    update_interval: never
+
+# --- LVGL User Interface (320x172 Split Layout: Art on Left, Info on Right) ---
+lvgl:
+  displays:
+    - main_lcd
+  buffer_size: 25%
+  bg_color: 0x0B0F19
+  pages:
+    - id: main_page
+      widgets:
+        # Left Side: 128x128 Album Art Frame
+        - obj:
+            id: art_frame
+            align: LEFT_MID
+            x: 8
+            y: 0
+            width: 132
+            height: 132
+            bg_color: 0x1E293B
+            border_color: 0x334155
+            border_width: 2
+            radius: 10
+            pad_all: 0
+            widgets:
+              - image:
+                  id: img_album
+                  align: CENTER
+                  src: album_cover_img
+
+        # Right Side Top: Mode / Favourite Counter
+        - label:
+            id: lbl_header
+            align: TOP_LEFT
+            x: 150
+            y: 14
+            width: 160
+            text: "NOW PLAYING"
+            text_color: 0x38BDF8
+
+        # Right Side Middle: Track Title OR Selected Favourite Name
+        - label:
+            id: lbl_main
+            align: TOP_LEFT
+            x: 150
+            y: 48
+            width: 160
+            long_mode: SCROLL_CIRCULAR
+            text: "Ready"
+            text_color: 0xFFFFFF
+
+        # Right Side Sub: Artist Name OR Action Hint
+        - label:
+            id: lbl_sub
+            align: TOP_LEFT
+            x: 150
+            y: 84
+            width: 160
+            long_mode: SCROLL_CIRCULAR
+            text: "Click BOOT to Browse"
+            text_color: 0x94A3B8
+
+        # Right Side Bottom: Playback Status
+        - label:
+            id: lbl_footer
+            align: BOTTOM_LEFT
+            x: 150
+            y: -14
+            width: 160
+            text: "IDLE"
+            text_color: 0x64748B
+
+# --- Navigation & Artwork Scripts ---
+script:
+  - id: browsing_timeout
+    mode: restart
+    then:
+      - delay: 5s
+      - lambda: 'id(browsing_mode) = false;'
+      - lvgl.label.update:
+          id: lbl_header
+          text: "NOW PLAYING"
+          text_color: 0x38BDF8
+      - lvgl.label.update:
+          id: lbl_main
+          text: !lambda 'return id(sonos_title).state.empty() ? std::string("Sonos Ready") : id(sonos_title).state;'
+      - lvgl.label.update:
+          id: lbl_sub
+          text: !lambda 'return id(sonos_artist).state;'
+
+  - id: show_selected_favourite
+    mode: restart
+    then:
+      - lambda: |-
+          id(browsing_mode) = true;
+          ESP_LOGI("favs", "Currently loaded %d favourites in RAM.", (int)id(fav_names).size());
+      - lvgl.label.update:
+          id: lbl_header
+          text: !lambda |-
+            int total = id(fav_names).size();
+            if (total == 0) return std::string("NO FAVOURITES");
+            char hdr[32];
+            snprintf(hdr, sizeof(hdr), "FAV (%d/%d)", id(fav_index) + 1, total);
+            return std::string(hdr);
+      - lvgl.label.update:
+          id: lbl_main
+          text: !lambda |-
+            if (id(fav_names).empty()) return std::string("Empty");
+            return id(fav_names)[id(fav_index)];
+      - lvgl.label.update:
+          id: lbl_sub
+          text: "Hold BOOT to Play"
+      - script.execute: browsing_timeout
+
+  # Asks HA to convert the current Sonos cover to a 128x128 PNG via ffmpeg, then downloads it over LAN
+  - id: fetch_album_art
+    mode: restart
+    then:
+      # Wait 1.5s so Sonos finishes updating its entity_picture attribute after switching favourites/tracks
+      - delay: 1.5s
+      - if:
+          condition:
+            lambda: 'return !id(sonos_art_url).state.empty() && id(sonos_art_url).state != "unavailable";'
+          then:
+            - homeassistant.action:
+                action: shell_command.convert_sonos_art
+                data:
+                  url: !lambda 'return id(sonos_art_url).state.c_str();'
+            - delay: 1.2s
+            - lambda: |-
+                char local_url[128];
+                snprintf(local_url, sizeof(local_url), "${ha_base_url}/local/sonos_cover.png?ts=%lu", (unsigned long)millis());
+                ESP_LOGI("art", "Downloading local 128x128 PNG: %s", local_url);
+                id(album_cover_img).set_url(std::string(local_url));
+                id(album_cover_img).update();
+
+# --- Physical BOOT Button (GPIO9 - the button AWAY from the USB-C port) ---
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO9
+      inverted: true
+      ignore_strapping_warning: true
+      mode:
+        input: true
+        pullup: true
+    name: "Boot Button"
+    id: boot_btn
+    on_multi_click:
+      # HOLD (>= 0.5s): Play Selected Favourite OR Toggle Play/Pause
+      - timing:
+          - ON for at least 0.5s
+        then:
+          - if:
+              condition:
+                lambda: 'return id(browsing_mode) && !id(fav_ids).empty();'
+              then:
+                - lvgl.label.update:
+                    id: lbl_sub
+                    text: "Starting on Sonos..."
+                - homeassistant.action:
+                    action: media_player.play_media
+                    data:
+                      entity_id: ${sonos_entity}
+                      media_content_type: "favorite_item_id"
+                      media_content_id: !lambda 'return id(fav_ids)[id(fav_index)].c_str();'
+                - lambda: 'id(browsing_mode) = false;'
+                # Trigger an artwork refresh once the new favourite starts playing
+                - delay: 3s
+                - script.execute: fetch_album_art
+              else:
+                - lvgl.label.update:
+                    id: lbl_sub
+                    text: "Toggling Play/Pause..."
+                - homeassistant.action:
+                    action: media_player.media_play_pause
+                    data:
+                      entity_id: ${sonos_entity}
+
+      # SINGLE CLICK: Next Favourite
+      - timing:
+          - ON for at most 0.4s
+          - OFF for at least 0.2s
+        then:
+          - lambda: |-
+              int total = id(fav_names).size();
+              if (total > 0) {
+                id(fav_index) = (id(fav_index) + 1) % total;
+              }
+          - script.execute: show_selected_favourite
+
+# --- Home Assistant Sensors ---
+sensor:
+  - platform: homeassistant
+    entity_id: sensor.ws2900_outdoor_temperature
+    id: outdoor_temp
+    internal: true
+
+text_sensor:
+  # 1. Sonos Favourites List
+  - platform: homeassistant
+    id: ha_sonos_favs
+    entity_id: ${sonos_favs_entity}
+    attribute: items
+    on_value:
+      then:
+        - lambda: |-
+            id(fav_ids).clear();
+            id(fav_names).clear();
+            auto next_quoted = [&](size_t &pos, std::string &out) -> bool {
+              while (pos < x.length() && x[pos] != '\'' && x[pos] != '"') pos++;
+              if (pos >= x.length()) return false;
+              char q = x[pos++];
+              out.clear();
+              while (pos < x.length()) {
+                if (x[pos] == '\\' && pos + 1 < x.length()) {
+                  out += x[++pos];
+                  pos++;
+                } else if (x[pos] == q) {
+                  pos++;
+                  return true;
+                } else {
+                  out += x[pos++];
+                }
+              }
+              return false;
+            };
+
+            size_t pos = 0;
+            std::string k, v;
+            while (next_quoted(pos, k) && next_quoted(pos, v)) {
+              id(fav_ids).push_back(k);
+              id(fav_names).push_back(v);
+            }
+            ESP_LOGI("favs", "Parsed %d Sonos favourites", (int)id(fav_names).size());
+
+  # 2. Sonos Playback State & Acrylic RGB LED
+  - platform: homeassistant
+    id: sonos_state
+    entity_id: ${sonos_entity}
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: lbl_footer
+            text: !lambda |-
+              std::string s = x;
+              for (auto & c: s) c = toupper(c);
+              return s;
+        - if:
+            condition:
+              lambda: 'return x == "playing";'
+            then:
+              - light.turn_on:
+                  id: status_led
+                  red: 0%
+                  green: 100%
+                  blue: 20%
+                  brightness: 50%
+            else:
+              - if:
+                  condition:
+                    lambda: 'return x == "paused";'
+                  then:
+                    - light.turn_on:
+                        id: status_led
+                        red: 100%
+                        green: 50%
+                        blue: 0%
+                        brightness: 35%
+                  else:
+                    - light.turn_off: status_led
+
+  # 3. Current Track Title (Also triggers artwork update when a new song starts)
+  - platform: homeassistant
+    id: sonos_title
+    entity_id: ${sonos_entity}
+    attribute: media_title
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(browsing_mode) && !x.empty();'
+            then:
+              - lvgl.label.update:
+                  id: lbl_main
+                  text: !lambda 'return x;'
+        - script.execute: fetch_album_art
+
+  # 4. Current Track Artist
+  - platform: homeassistant
+    id: sonos_artist
+    entity_id: ${sonos_entity}
+    attribute: media_artist
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(browsing_mode) && !x.empty();'
+            then:
+              - lvgl.label.update:
+                  id: lbl_sub
+                  text: !lambda 'return x;'
+
+  # 5. Trigger art refresh whenever Sonos track artwork URL changes
+  - platform: homeassistant
+    id: sonos_art_url
+    entity_id: ${sonos_entity}
+    attribute: entity_picture
+    on_value:
+      then:
+        - script.execute: fetch_album_art
